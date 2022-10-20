@@ -30,7 +30,6 @@ lazy_static! {
     static ref SERVER: Arc<RwLock<WebscoketServer>> = Arc::new(RwLock::new(WebscoketServer::new()));
     static ref CONNECTIONS: Arc<RwLock<HashMap<Uuid, Connection>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    static ref d: Arc<RwLock<u8>> = Arc::new(RwLock::new(0));
 }
 
 #[derive(Debug)]
@@ -40,61 +39,70 @@ struct WebscoketServer {
 
 impl WebscoketServer {
     fn new() -> WebscoketServer {
+        let lobby0 = Lobby::new(0);
+        let lobby1 = Lobby::new(1);
+
         WebscoketServer {
-            lobbies: HashMap::from([(0, Lobby::new(0)), (1, Lobby::new(2))]),
+            lobbies: HashMap::from([(0, lobby0), (1, lobby1)]),
         }
     }
-    /*
-    fn join_lobby(&mut self, lobby_id: u8, connection: &'a mut Connection) -> &mut Connection {
-        let id = connection.id;
-        connection.lobby = Some(lobby_id);
-
-        let lobby = self.lobbies.get_mut(&lobby_id).unwrap();
-        lobby.connections.insert(connection.id, connection);
-        lobby.connections.get_mut(&id).unwrap()
-    }
-    */
 }
 
 #[derive(Debug)]
 struct Lobby {
-    connections: HashMap<Uuid, Connection>,
+    connections: HashMap<Uuid, UnboundedSender<Message>>,
     id: u8,
     tx: UnboundedSender<Message>,
-    b_tx: Sender<Message>,
+    rx: UnboundedReceiverStream<Message>,
 }
 
 impl Lobby {
     fn new(id: u8) -> Lobby {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut rx = UnboundedReceiverStream::new(rx);
+        let rx = UnboundedReceiverStream::new(rx);
 
-        //
-        let (b_tx, mut b_rx) = broadcast::channel(16);
-        let rx2: Receiver<Message> = b_tx.subscribe();
-
+        /*
+        useless as the self cannot be borrowed as mutable
+        ***
         tokio::task::spawn(async move {
             while let Some(message) = rx.next().await {
-                println!("!{:#?}", message);
+                println!("[{}] {:#?}", id, message);
             }
         });
+        */
 
         Lobby {
             connections: HashMap::new(),
             id,
             tx,
-            b_tx,
+            rx,
         }
     }
 
-    fn test(&mut self, id: Uuid, msg: Message) {
-        println!("[lobby #{}] {}: {:#?}", self.id, id, msg);
+    async fn handle_events(&mut self) {
+        while let Some(message) = self.rx.next().await {
+            println!("[{}] {:#?}", self.id, message);
+            self.borrow_mut();
+        }
+    }
+
+    fn join(&mut self, id: &Uuid, tx: UnboundedSender<Message>) -> UnboundedSender<Message> {
+        self.connections.insert(*id, tx);
+        println!("[{}] User has joined the lobby", self.id);
+        self.tx.clone()
+    }
+
+    fn leave(&mut self, id: &Uuid) {
+        self.connections.remove(id);
+        println!("[{}] User has left the lobby", self.id);
+    }
+
+    fn broadcast(&mut self, msg: Message) {
+        self.connections.iter_mut().for_each(|(id, connection)| {
+            connection.send(msg.clone());
+        });
     }
 }
-/*
-    let (tx, rx) = mpsc::unbounded_channel();
-    let mut rx = UnboundedReceiverStream::new(rx);
-*/
 
 #[derive(Debug)]
 struct Connection {
@@ -102,8 +110,9 @@ struct Connection {
     lobby: Option<u8>,
     ws_write: SplitSink<WebSocketStream<Upgraded>, Message>,
     ws_read: SplitStream<WebSocketStream<Upgraded>>,
-    tx: Option<UnboundedSender<Message>>,
-    rx: Option<Receiver<Message>>,
+    tx: UnboundedSender<Message>,
+    rx: UnboundedReceiverStream<Message>,
+    lobby_tx: Option<UnboundedSender<Message>>,
 }
 
 impl Connection {
@@ -112,15 +121,44 @@ impl Connection {
         ws_read: SplitStream<WebSocketStream<Upgraded>>,
     ) -> Connection {
         let id = Uuid::new_v4();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rx = UnboundedReceiverStream::new(rx);
 
         Connection {
             id,
             ws_write,
             ws_read,
             lobby: None,
-            tx: None,
-            rx: None,
+            tx,
+            rx,
+            lobby_tx: None,
         }
+    }
+
+    async fn move_to_lobby(&mut self, lobby_id: &u8) {
+        if self.lobby.is_some() {
+            self.lobby_tx = None;
+            let id = self.lobby.unwrap();
+
+            SERVER
+                .write()
+                .await
+                .lobbies
+                .get_mut(&id)
+                .unwrap()
+                .leave(&self.id);
+        }
+
+        let lobby_tx = SERVER
+            .write()
+            .await
+            .lobbies
+            .get_mut(lobby_id)
+            .unwrap()
+            .join(&self.id, self.tx.clone());
+
+        self.lobby = Some(*lobby_id);
+        self.lobby_tx = Some(lobby_tx);
     }
 
     async fn handle_events(&mut self) {
@@ -128,27 +166,47 @@ impl Connection {
 
         loop {
             tokio::select! {
-                r = self.rx.as_mut().unwrap().recv() => {
+                r = self.rx.as_mut().recv() => {
                     match r {
-                        Ok(msg) => {
-                            //
-                            println!("test2: {:#?}", msg)
+                        Some(msg) => {
+
+                            println!("{}: {:#?}", self.id, msg);
+                            // forward messages from lobby to websocket
+                            self.ws_write.send(msg).await;
                         },
-                        Err(e) => {
-                            println!("err: {:#?}", e)
-                        }
+                        None => break
                     }
                 }
                 s = self.ws_read.next() => {
                     match s {
-                        Some(msg) => {
-                            println!("test1: {:#?}", msg)
+                        Some(r) => {
+                            match r {
+                                Ok(msg) => {
+                                    if msg.to_string() == "move" {
+                                        self.move_to_lobby(&1).await;
+                                    }
+                                    else {
+                                        // forward the websocket message to current lobby_tx
+                                        self.lobby_tx.as_mut().unwrap().send(msg.clone());
+                                    }
+                                },
+                                Err(e) => {
+                                    //
+                                    println!("err: {:#?}", e);
+                                }
+                            }
+
                         },
                         None => break
                     }
                 }
             }
         }
+        println!("handled disconnect");
+        self.lobby_tx
+            .as_mut()
+            .unwrap()
+            .send(Message::Text("client has disconnected".to_string()));
     }
 }
 
@@ -170,11 +228,6 @@ async fn handle_request(
                     tokio::spawn(async move {
                         match upgrade::on(&mut request).await {
                             Ok(upgraded) => {
-                                let mut b = d.write().await;
-                                *b += 1;
-
-                                std::mem::drop(b);
-
                                 tokio::spawn(async move {
                                     let ws_stream = WebSocketStream::from_raw_socket(
                                         upgraded,
@@ -183,125 +236,12 @@ async fn handle_request(
                                     )
                                     .await;
 
-                                    let (ws_write, mut ws_read) = ws_stream.split();
-
-                                    let b = SERVER
-                                        .write()
-                                        .await
-                                        .lobbies
-                                        .get_mut(&0)
-                                        .unwrap()
-                                        .tx
-                                        .clone();
-
-                                    let c = SERVER
-                                        .write()
-                                        .await
-                                        .lobbies
-                                        .get_mut(&0)
-                                        .unwrap()
-                                        .b_tx
-                                        .subscribe();
+                                    let (ws_write, ws_read) = ws_stream.split();
 
                                     let mut connection = Connection::new(ws_write, ws_read).await;
-                                    connection.tx = Some(b);
-                                    connection.rx = Some(c);
+                                    connection.move_to_lobby(&2).await;
                                     connection.handle_events().await;
                                 });
-
-                                let a = d.read().await;
-
-                                println!("{}", *a);
-
-                                if *a > 1 {
-                                    let t = SERVER
-                                        .write()
-                                        .await
-                                        .lobbies
-                                        .get_mut(&0)
-                                        .unwrap()
-                                        .b_tx
-                                        .send(Message::text("user connected".to_string()));
-
-                                    println!("{:#?}", t);
-                                }
-                                /*
-                                SERVER
-                                    .write()
-                                    .await
-                                    .lobbies
-                                    .get_mut(&0)
-                                    .unwrap()
-                                    .connections
-                                    .insert(id, c);
-                                */
-                                /*
-                                server
-                                    .lobbies
-                                    .get_mut(&0)
-                                    .unwrap()
-                                    .connections
-                                    .insert(connection.id, connection.borrow_mut());
-                                // a.handle_events(ws_read).await;
-                                */
-
-                                /*
-                                let mut server = SERVER.write().await;
-                                let connection = server.join_lobby(0, connection);
-                                */
-
-                                // connection.handleEvents();
-                                // SERVER.lock().await.join_lobby(0, connection);
-                                //
-
-                                /*
-                                tokio::spawn(async move {
-                                    let mut a = SERVER.lock().await;
-                                    let b = a.lobbies.get_mut(&0).unwrap();
-                                    b.handleEvents(0).await;
-                                    std::mem::drop(a);
-
-                                    // connection.handleEvents().await;
-                                });
-                                */
-
-                                /*
-                                //create a websocket stream from the upgraded object
-                                let ws_stream = WebSocketStream::from_raw_socket(
-                                    //pass the upgraded object
-                                    //as the base layer stream of the Websocket
-                                    upgraded,
-                                    tokio_tungstenite::tungstenite::protocol::Role::Server,
-                                    None,
-                                )
-                                .await;
-
-                                //we can split the stream into a sink and a stream
-                                let (mut ws_write, mut ws_read) = ws_stream.split();
-
-                                while let Some(msg) = ws_read.next().await {
-                                    let msg = msg.unwrap();
-                                    if msg.is_text() || msg.is_binary() {
-                                        println!("{:#?}", msg);
-                                        ws_write.send(msg).await;
-                                    }
-                                }
-
-                                //forward the stream to the sink to achieve echo
-
-                                match ws_read.forward(ws_write).await {
-                                    Ok(_) => {}
-                                    Err(Error::ConnectionClosed) => {
-                                        println!("Connection closed normally")
-                                    }
-                                    Err(e) => println!(
-                                        "error creating echo stream on \
-                                                    connection from address {}. \
-                                                    Error is {}",
-                                        remote_addr, e
-                                    ),
-                                };
-                                */
                             }
                             Err(e) => println!(
                                 "error when trying to upgrade connection \
