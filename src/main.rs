@@ -1,3 +1,4 @@
+use futures::select;
 use futures::stream::{SplitSink, SplitStream, StreamExt};
 use futures::{FutureExt, SinkExt};
 use hyper::service::{make_service_fn, service_fn};
@@ -10,72 +11,142 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::hash::Hash;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::u8;
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::WebSocketStream;
 use tungstenite::{handshake, Error, Message};
+
+use uuid::Uuid;
 
 #[macro_use]
 extern crate lazy_static;
 
 lazy_static! {
-    static ref LOBBIES: Mutex<HashMap<u8, Lobby>> =
-        Mutex::new(HashMap::from([(0, Lobby::new()), (1, Lobby::new())]));
+    static ref SERVER: Arc<RwLock<WebscoketServer>> = Arc::new(RwLock::new(WebscoketServer::new()));
+    static ref CONNECTIONS: Arc<RwLock<HashMap<Uuid, Connection>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    static ref d: Arc<RwLock<u8>> = Arc::new(RwLock::new(0));
+}
+
+#[derive(Debug)]
+struct WebscoketServer {
+    lobbies: HashMap<u8, Lobby>,
+}
+
+impl WebscoketServer {
+    fn new() -> WebscoketServer {
+        WebscoketServer {
+            lobbies: HashMap::from([(0, Lobby::new(0)), (1, Lobby::new(2))]),
+        }
+    }
+    /*
+    fn join_lobby(&mut self, lobby_id: u8, connection: &'a mut Connection) -> &mut Connection {
+        let id = connection.id;
+        connection.lobby = Some(lobby_id);
+
+        let lobby = self.lobbies.get_mut(&lobby_id).unwrap();
+        lobby.connections.insert(connection.id, connection);
+        lobby.connections.get_mut(&id).unwrap()
+    }
+    */
 }
 
 #[derive(Debug)]
 struct Lobby {
-    connections: Vec<Connection>,
+    connections: HashMap<Uuid, Connection>,
+    id: u8,
+    tx: UnboundedSender<Message>,
+    b_tx: Sender<Message>,
 }
 
 impl Lobby {
-    fn new() -> Lobby {
+    fn new(id: u8) -> Lobby {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut rx = UnboundedReceiverStream::new(rx);
+
+        //
+        let (b_tx, mut b_rx) = broadcast::channel(16);
+        let rx2: Receiver<Message> = b_tx.subscribe();
+
+        tokio::task::spawn(async move {
+            while let Some(message) = rx.next().await {
+                println!("!{:#?}", message);
+            }
+        });
+
         Lobby {
-            connections: Vec::new(),
+            connections: HashMap::new(),
+            id,
+            tx,
+            b_tx,
         }
     }
+
+    fn test(&mut self, id: Uuid, msg: Message) {
+        println!("[lobby #{}] {}: {:#?}", self.id, id, msg);
+    }
 }
+/*
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut rx = UnboundedReceiverStream::new(rx);
+*/
 
 #[derive(Debug)]
 struct Connection {
-    sender: SplitSink<WebSocketStream<Upgraded>, Message>,
-    receiver: SplitStream<WebSocketStream<Upgraded>>,
-    lobby: Option<Lobby>,
+    id: Uuid,
+    lobby: Option<u8>,
+    ws_write: SplitSink<WebSocketStream<Upgraded>, Message>,
+    ws_read: SplitStream<WebSocketStream<Upgraded>>,
+    tx: Option<UnboundedSender<Message>>,
+    rx: Option<Receiver<Message>>,
 }
 
 impl Connection {
-    async fn new(upgraded: Upgraded) -> Connection {
-        let ws_stream = WebSocketStream::from_raw_socket(
-            upgraded,
-            tokio_tungstenite::tungstenite::protocol::Role::Server,
-            None,
-        )
-        .await;
-
-        let (ws_write, ws_read) = ws_stream.split();
+    async fn new(
+        ws_write: SplitSink<WebSocketStream<Upgraded>, Message>,
+        ws_read: SplitStream<WebSocketStream<Upgraded>>,
+    ) -> Connection {
+        let id = Uuid::new_v4();
 
         Connection {
-            sender: ws_write,
-            receiver: ws_read,
+            id,
+            ws_write,
+            ws_read,
             lobby: None,
+            tx: None,
+            rx: None,
         }
     }
 
-    async fn joinLobby(mut self) {
-        LOBBIES
-            .lock()
-            .unwrap()
-            .get_mut(&0)
-            .unwrap()
-            .connections
-            .push(self);
-    }
+    async fn handle_events(&mut self) {
+        println!("handling events...");
 
-    async fn handleEvents(&mut self) {
-        while let Some(msg) = self.receiver.next().await {
-            let msg = msg.unwrap();
-            if msg.is_text() || msg.is_binary() {
-                println!("{:#?}", msg);
-                self.sender.send(msg).await;
+        loop {
+            tokio::select! {
+                r = self.rx.as_mut().unwrap().recv() => {
+                    match r {
+                        Ok(msg) => {
+                            //
+                            println!("test2: {:#?}", msg)
+                        },
+                        Err(e) => {
+                            println!("err: {:#?}", e)
+                        }
+                    }
+                }
+                s = self.ws_read.next() => {
+                    match s {
+                        Some(msg) => {
+                            println!("test1: {:#?}", msg)
+                        },
+                        None => break
+                    }
+                }
             }
         }
     }
@@ -99,13 +170,100 @@ async fn handle_request(
                     tokio::spawn(async move {
                         match upgrade::on(&mut request).await {
                             Ok(upgraded) => {
-                                println!("{:#?}", LOBBIES.lock().unwrap());
-                                let connection = Connection::new(upgraded).await;
-                                connection.joinLobby().await;
+                                let mut b = d.write().await;
+                                *b += 1;
 
-                                println!("{:#?}", LOBBIES.lock().unwrap());
+                                std::mem::drop(b);
 
-                                // connection.handleEvents().await;
+                                tokio::spawn(async move {
+                                    let ws_stream = WebSocketStream::from_raw_socket(
+                                        upgraded,
+                                        tokio_tungstenite::tungstenite::protocol::Role::Server,
+                                        None,
+                                    )
+                                    .await;
+
+                                    let (ws_write, mut ws_read) = ws_stream.split();
+
+                                    let b = SERVER
+                                        .write()
+                                        .await
+                                        .lobbies
+                                        .get_mut(&0)
+                                        .unwrap()
+                                        .tx
+                                        .clone();
+
+                                    let c = SERVER
+                                        .write()
+                                        .await
+                                        .lobbies
+                                        .get_mut(&0)
+                                        .unwrap()
+                                        .b_tx
+                                        .subscribe();
+
+                                    let mut connection = Connection::new(ws_write, ws_read).await;
+                                    connection.tx = Some(b);
+                                    connection.rx = Some(c);
+                                    connection.handle_events().await;
+                                });
+
+                                let a = d.read().await;
+
+                                println!("{}", *a);
+
+                                if *a > 1 {
+                                    let t = SERVER
+                                        .write()
+                                        .await
+                                        .lobbies
+                                        .get_mut(&0)
+                                        .unwrap()
+                                        .b_tx
+                                        .send(Message::text("user connected".to_string()));
+
+                                    println!("{:#?}", t);
+                                }
+                                /*
+                                SERVER
+                                    .write()
+                                    .await
+                                    .lobbies
+                                    .get_mut(&0)
+                                    .unwrap()
+                                    .connections
+                                    .insert(id, c);
+                                */
+                                /*
+                                server
+                                    .lobbies
+                                    .get_mut(&0)
+                                    .unwrap()
+                                    .connections
+                                    .insert(connection.id, connection.borrow_mut());
+                                // a.handle_events(ws_read).await;
+                                */
+
+                                /*
+                                let mut server = SERVER.write().await;
+                                let connection = server.join_lobby(0, connection);
+                                */
+
+                                // connection.handleEvents();
+                                // SERVER.lock().await.join_lobby(0, connection);
+                                //
+
+                                /*
+                                tokio::spawn(async move {
+                                    let mut a = SERVER.lock().await;
+                                    let b = a.lobbies.get_mut(&0).unwrap();
+                                    b.handleEvents(0).await;
+                                    std::mem::drop(a);
+
+                                    // connection.handleEvents().await;
+                                });
+                                */
 
                                 /*
                                 //create a websocket stream from the upgraded object

@@ -3,6 +3,9 @@ name = "tokio-websocket"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+#![feature(let_chains)]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -12,3 +15,5 @@ tokio = { version="1.0", features=["rt","macros"] }
 hyper={ version="0.14", features=["server","http1","http2","tcp"] }
 tungstenite={ version="0.12", default-features=false }
 tokio-tungstenite={ version="0.13" }
+uuid = { version = "1.2.1", features = ["v4"] }
+tokio-stream = "0.1.11"
