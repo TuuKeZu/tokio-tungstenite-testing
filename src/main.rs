@@ -153,12 +153,12 @@ impl Connection {
             .write()
             .await
             .lobbies
-            .get_mut(lobby_id)
+            .get_mut(dbg!(lobby_id))
             .unwrap()
             .join(&self.id, self.tx.clone());
 
         self.lobby = Some(*lobby_id);
-        self.lobby_tx = Some(lobby_tx);
+        self.lobby_tx = Some(lobby_tx); // BUG does not reflect state in SERVER
     }
 
     async fn handle_events(&mut self) {
@@ -182,7 +182,7 @@ impl Connection {
                         Some(r) => {
                             match r {
                                 Ok(msg) => {
-                                    if msg.to_string() == "move" {
+                                    if dbg!(msg.to_text()).unwrap().starts_with("move") {
                                         self.move_to_lobby(&1).await;
                                     }
                                     else {
@@ -239,7 +239,7 @@ async fn handle_request(
                                     let (ws_write, ws_read) = ws_stream.split();
 
                                     let mut connection = Connection::new(ws_write, ws_read).await;
-                                    connection.move_to_lobby(&2).await;
+                                    // connection.move_to_lobby(&2).await;
                                     connection.handle_events().await;
                                 });
                             }
@@ -328,3 +328,8 @@ async fn main() {
         eprintln!("server error: {}", e);
     }
 }
+
+// TODO rewrite:
+// - no lazy_static
+// - no unnecessary spawns
+// -
