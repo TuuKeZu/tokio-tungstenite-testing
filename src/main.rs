@@ -28,8 +28,6 @@ extern crate lazy_static;
 
 lazy_static! {
     static ref SERVER: Arc<RwLock<WebscoketServer>> = Arc::new(RwLock::new(WebscoketServer::new()));
-    static ref CONNECTIONS: Arc<RwLock<HashMap<Uuid, Connection>>> =
-        Arc::new(RwLock::new(HashMap::new()));
 }
 
 #[derive(Debug)]
