@@ -7,16 +7,12 @@ edition = "2021"
 name = "main"
 path = "src/main.rs"
 
-[features]
-#![feature(let_chains)]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 lazy_static = { version="1.4.0"}
 futures = { version="0.3" }
 tokio = { version="1.0", features=["io-std","rt-multi-thread","macros"] }
 hyper={ version="0.14", features=["server","http1","http2","tcp"] }
+serde = { version = "1.0", features = ["derive"] }
 tungstenite={ version="0.12", default-features=false }
 tokio-tungstenite={ version="0.13" }
 uuid = { version = "1.2.1", features = ["v4"] }
@@ -24,13 +20,3 @@ tokio-stream = "0.1.11"
 futures-channel = "0.3"
 hyper-tungstenite = "0.8.1"
 url = "2.3.1"
-
-# async-tungstenite = { version = "0.16.1", features = ["tokio-runtime"] }
-# backoff = { version = "0.4.0", features = ["tokio"] }
-# cookie = "0.16.0"
-# futures = "0.3.21"
-# hyper = { version = "0.14.17", features = ["full"] }
-# serde = { version = "1.0.136", features = ["derive"] }
-# structopt = "0.3.26"
-# tokio = { version = "1.16.1", features = ["full"] }
-# tungstenite = "0.16.0"
