@@ -21,6 +21,11 @@ struct Lobby {
     connections: HashMap<usize, Arc<Mutex<SplitSink<WebSocketStream<Upgraded>, Message>>>>,
 }
 
+enum ChangeLobbyMessage {
+    Change(Uuid),
+    None,
+}
+
 impl Lobby {
     fn new() -> Lobby {
         Lobby {
@@ -28,9 +33,14 @@ impl Lobby {
             connections: HashMap::new(),
         }
     }
-    pub async fn handle_message(&mut self, msg: Message, id: usize) {
+    pub async fn handle_message(&mut self, msg: Message, id: usize) -> ChangeLobbyMessage {
         println!("Connection {id} received: {msg}");
-        self.broadcast(msg).await;
+        self.broadcast(msg.clone()).await;
+        if msg.to_text().unwrap() == "change" {
+            ChangeLobbyMessage::Change(self.id) // TODO example just changes back to self
+        } else {
+            ChangeLobbyMessage::None
+        }
     }
 
     pub async fn broadcast(&mut self, msg: Message) {
@@ -42,7 +52,7 @@ impl Lobby {
 
 async fn handle_messages(
     websocket: HyperWebsocket,
-    mapping: Arc<RwLock<HashMap<usize, Arc<Mutex<Lobby>>>>>,
+    mapping: Arc<RwLock<HashMap<usize, Arc<Mutex<Lobby>>>>>, // TODO remove usize, lobby already has an id
     id: usize,
 ) -> Result<(), Error> {
     let websocket = websocket.await?;
@@ -57,12 +67,12 @@ async fn handle_messages(
         .connections
         .insert(id, Arc::new(Mutex::new(ws_write)));
 
-    std::mem::drop(mapping_lock);
+    drop(mapping_lock);
 
     while let Some(message) = ws_read.next().await {
         let message = message?;
         let text = message.to_text()?;
-        if let Some(lobby) = mapping.read().await.get(&id) {
+        let changemsg = if let Some(lobby) = mapping.read().await.get(&id) {
             let mut l = lobby.lock().await;
             println!(
                 "[lobby {} with {} users] Connection {id} received: {text}",
@@ -71,16 +81,25 @@ async fn handle_messages(
             );
             // websocket.send(message).await.unwrap();
             // tx.send(message).await?;
-            l.handle_message(message, id).await;
-            std::mem::drop(l);
+            l.handle_message(message, id).await
         } else {
             unreachable!()
+        };
+        if let ChangeLobbyMessage::Change(new_lobby_id) = changemsg {
+            if let Some(new_lobby) = mapping
+                .read()
+                .await
+                .iter()
+                .find(&new_lobby_id) // FIXME
+                .map(Arc::clone)
+            {
+                // change lobby of connection id
+            } else {
+                eprintln!("Lobby tried to change connection to nonexistent lobby");
+                // should not panic?
+            }
         }
     }
-
-    let mut mapping_lock = mapping.write().await;
-    mapping_lock.remove(&id);
-
     Ok(())
 }
 
@@ -99,16 +118,18 @@ async fn handle_connection(
         mapping_lock.insert(id, Arc::new(Mutex::new(Lobby::new())));
     };
 
-    std::mem::drop(mapping_lock);
+    drop(mapping_lock);
 
     if hyper_tungstenite::is_upgrade_request(&request) {
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)?;
 
         tokio::spawn(async move {
-            let mapping = Arc::clone(&mapping);
-            if let Err(e) = handle_messages(websocket, mapping, id).await {
+            let mapping2 = Arc::clone(&mapping);
+            if let Err(e) = handle_messages(websocket, mapping2, id).await {
                 eprintln!("Error in websocket connection: {}", e);
             }
+            let mut mapping_lock = mapping.write().await;
+            mapping_lock.remove(&id);
         });
 
         Ok(response)
