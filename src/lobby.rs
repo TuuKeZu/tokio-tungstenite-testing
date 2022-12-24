@@ -4,15 +4,14 @@ use hyper::upgrade::Upgraded;
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::WebSocketStream;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{collections::HashMap, fmt};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type WebSocketSink = Arc<Mutex<SplitSink<WebSocketStream<Upgraded>, Message>>>;
 
-#[derive(Debug)]
 pub struct Connection {
     pub id: Uuid,
     pub sink: WebSocketSink,
@@ -24,36 +23,28 @@ impl Connection {
     }
 }
 
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Connection [{}]", self.id)
+    }
+}
+
+impl fmt::Display for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Connection [{}]", self.id)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-/// Deserializable packet form client
+/// Deserializable packet from client
 pub enum ClientPacket {
     Message { text: String },
     Close { info: Option<String> },
 }
 
-pub enum LobbyRequest {
-    Create { lobby_id: Uuid },
-    List,
-    Change { lobby_id: Uuid },
-    None,
-}
-
-// trait Lobby {
-//     type ClientPacket;
-
-//     fn get_id(&self) -> Uuid;
-
-//     fn handle_message(&mut self, ClientPacket) -> ChangeLobbyMessage;
-
-//     fn join(&mut self, SplitSink<WebSocketStream<Upgraded>, Message>);
-
-//     fn exit(&mut self, usize);
-// }
-
 impl ClientPacket {
     fn new(msg: Message) -> Result<ClientPacket, Error> {
-        // TODO should return Result
         match msg {
             Message::Text(text) => Ok(ClientPacket::Message { text }),
             Message::Binary(_) => todo!(),
@@ -82,34 +73,61 @@ impl Into<Message> for LobbyPacket {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
+pub enum LobbyRequest {
+    Create { lobby_id: Uuid },
+    List,
+    Change { lobby_id: Uuid },
+    None,
+}
+
+/// Default struct for lobbies. Includes the base functionalities for lobby.
+pub trait DefaultLobby {
+    fn new(id: Uuid) -> Self;
+
+    fn default() -> Self;
+
+    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>>;
+
+    async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error>;
+
+    async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error>;
+
+    async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error>;
+
+    async fn join(&self, conn: Arc<Connection>);
+
+    async fn leave(&self, id: &Uuid);
+}
+
+#[derive(Default)]
 pub struct Lobby {
     pub id: Uuid,
     pub connections: RwLock<Vec<Arc<Connection>>>,
 }
 
-impl Lobby {
-    pub fn new(id: Uuid) -> Lobby {
+impl DefaultLobby for Lobby {
+    fn new(id: Uuid) -> Lobby {
         Lobby {
             id,
             connections: RwLock::new(vec![]),
         }
     }
 
-    pub fn default() -> Lobby {
+    fn default() -> Lobby {
         Lobby {
             id: Uuid::new_v4(),
             connections: RwLock::new(vec![]),
         }
     }
 
-    async fn get_connection(&self, id: &Uuid) -> Option<WebSocketSink> {
+    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>> {
         self.connections
             .read()
             .await
             .iter()
             .find(|conn| id == &conn.id)
-            .map(|conn| Arc::clone(&conn.sink))
+            .map(Arc::clone)
     }
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error> {
@@ -125,9 +143,9 @@ impl Lobby {
         Ok(())
     }
 
-    pub async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
-        if let Some(sink) = self.get_connection(conn_id).await {
-            sink.lock().await.send(msg.clone().into()).await?;
+    async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
+        if let Some(conn) = self.get_connection(conn_id).await {
+            conn.sink.lock().await.send(msg.clone().into()).await?;
         } else {
             eprintln!("Cannot emit to non-existent connection {conn_id}");
         }
@@ -135,7 +153,7 @@ impl Lobby {
         Ok(())
     }
 
-    pub async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error> {
+    async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error> {
         match msg.clone() {
             Message::Text(text) => {
                 match text.as_str() {
@@ -163,15 +181,27 @@ impl Lobby {
         Ok(LobbyRequest::None)
     }
 
-    pub async fn join(&self, conn: Arc<Connection>) {
+    async fn join(&self, conn: Arc<Connection>) {
         println!("[Lobby {}] Connection {} has connected", self.id, conn.id);
         // handle connection joining
         self.connections.write().await.push(conn);
     }
 
-    pub async fn leave(&self, id: &Uuid) {
+    async fn leave(&self, id: &Uuid) {
         println!("[Lobby {}] Connection {} has disconnected", self.id, id);
         // handle connection leaving
         self.connections.write().await.retain(|conn| &conn.id != id);
+    }
+}
+
+impl fmt::Debug for Lobby {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Lobby [{}]", self.id)
+    }
+}
+
+impl fmt::Display for Lobby {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Lobby [{}]", self.id)
     }
 }

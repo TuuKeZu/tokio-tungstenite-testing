@@ -1,4 +1,6 @@
 #![feature(allocator_api)]
+#![feature(async_fn_in_trait)]
+
 mod lobby;
 
 use futures::stream::{SplitSink, StreamExt};
@@ -9,7 +11,7 @@ use hyper::upgrade::Upgraded;
 use hyper::{Body, Request, Response, Server};
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
-use lobby::{Connection, Lobby, LobbyRequest};
+use lobby::{Connection, DefaultLobby, Lobby, LobbyRequest};
 use std::alloc::Global;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -63,11 +65,20 @@ impl LobbyManager {
             lobby.join(conn).await;
             self.mapping.write().await.insert(conn_id, lobby.id);
         } else {
-            let lobby = Lobby::default();
+            let lobby = <Lobby as DefaultLobby>::default();
             lobby.join(conn).await;
             self.mapping.write().await.insert(conn_id, lobby.id);
             lobby_lock.push(lobby);
         }
+    }
+
+    pub async fn get_connection(&self, conn_id: Uuid) -> Option<Arc<Connection>> {
+        self.connections
+            .read()
+            .await
+            .iter()
+            .find(|c| c.id == conn_id)
+            .cloned()
     }
 
     pub async fn remove_client(&self, conn_id: Uuid) {
@@ -84,8 +95,8 @@ impl LobbyManager {
     }
 
     pub async fn handle_message(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
-        let mut lobby_lock = self.lobbies.write().await;
-        let lobby_id = self.mapping.read().await.get(&conn_id).unwrap().clone();
+        let lobby_lock = self.lobbies.write().await;
+        let lobby_id = *self.mapping.read().await.get(&conn_id).unwrap();
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.id == lobby_id) {
             let l_request = lobby.handle_message(msg, conn_id).await?;
@@ -97,14 +108,10 @@ impl LobbyManager {
                 }
                 LobbyRequest::Create { lobby_id } => {
                     self.create_lobby(lobby_id, lobby_lock)?;
-                    println!("created new lobby: {}", lobby_id);
                 }
                 LobbyRequest::List => {
                     let msg = lobby::LobbyPacket::Message {
-                        text: format!(
-                            "lobbies: {:#?}",
-                            lobby_lock.iter().map(|l| l.id).collect::<Vec<Uuid>>()
-                        ),
+                        text: format!("lobbies: {:#?}", lobby_lock),
                     };
 
                     lobby.emit(&conn_id, msg).await?;
@@ -126,28 +133,19 @@ impl LobbyManager {
         &self,
         conn_id: Uuid,
         new_lobby: Uuid,
-        mut lobby_lock: LobbyGuard<'_>,
+        lobby_lock: LobbyGuard<'_>,
     ) -> Result<(), Error> {
-        let old_lobby = self.mapping.read().await.get(&conn_id).unwrap().clone();
+        let old_lobby = *self.mapping.read().await.get(&conn_id).unwrap();
 
         if old_lobby == new_lobby {
             println!("You are already in this lobby");
             return Ok(());
         }
 
-        let conn = self
-            .connections
-            .read()
-            .await
-            .iter()
-            .find(|c| c.id == conn_id)
-            .unwrap()
-            .clone();
+        let conn = self.get_connection(conn_id).await.unwrap();
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.id == old_lobby) {
             lobby.leave(&conn_id).await;
-        } else {
-            eprintln!("Connection dropped while trying to join new lobby");
         }
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.id == new_lobby) {
