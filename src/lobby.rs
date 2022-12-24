@@ -12,6 +12,7 @@ use uuid::Uuid;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type WebSocketSink = Arc<Mutex<SplitSink<WebSocketStream<Upgraded>, Message>>>;
 
+#[derive(Debug)]
 pub struct Connection {
     pub id: Uuid,
     pub sink: WebSocketSink,
@@ -31,8 +32,10 @@ pub enum ClientPacket {
     Close { info: Option<String> },
 }
 
-pub enum ChangeLobbyMessage {
-    Change(Uuid),
+pub enum LobbyRequest {
+    Create { lobby_id: Uuid },
+    List { connection_id: Uuid },
+    Change { lobby_id: Uuid },
     None,
 }
 
@@ -79,13 +82,21 @@ impl Into<Message> for LobbyPacket {
     }
 }
 
+#[derive(Default)]
 pub struct Lobby {
     pub id: Uuid,
     pub connections: RwLock<Vec<Connection>>,
 }
 
 impl Lobby {
-    pub fn new() -> Lobby {
+    pub fn new(id: Uuid) -> Lobby {
+        Lobby {
+            id,
+            connections: RwLock::new(vec![]),
+        }
+    }
+
+    pub fn default() -> Lobby {
         Lobby {
             id: Uuid::new_v4(),
             connections: RwLock::new(vec![]),
@@ -103,7 +114,6 @@ impl Lobby {
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error> {
         for connection in self.connections.read().await.iter() {
-            println!("broadcasting to {}", connection.id);
             connection
                 .sink
                 .lock()
@@ -115,7 +125,7 @@ impl Lobby {
         Ok(())
     }
 
-    async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
+    pub async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
         if let Some(sink) = self.get_connection(conn_id).await {
             sink.lock().await.send(msg.clone().into()).await?;
         } else {
@@ -125,28 +135,23 @@ impl Lobby {
         Ok(())
     }
 
-    pub async fn handle_message(
-        &self,
-        msg: Message,
-        id: Uuid,
-    ) -> Result<ChangeLobbyMessage, Error> {
+    pub async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error> {
         match msg.clone() {
             Message::Text(text) => {
+                match text.as_str() {
+                    "list" => return Ok(LobbyRequest::List { connection_id: id }),
+                    "create" => {
+                        return Ok(LobbyRequest::Create {
+                            lobby_id: Uuid::new_v4(),
+                        })
+                    }
+                    "change" => return Ok(LobbyRequest::Change { lobby_id: self.id }),
+                    &_ => {}
+                }
+
                 println!("[Lobby {}] Connection {}: {}", self.id, id, text);
                 self.broadcast(LobbyPacket::Message { text: text.clone() })
-                    .await?;
-
-                // if something happens:
-                /*
-                match &text.split(' ').collect::<Vec<_>>()[..] {
-                    &["change", id] => {
-                        return Ok(ChangeLobbyMessage::Change(
-                            id.parse::<Uuid>().unwrap(), /* Fixme comes from client */
-                        ));
-                    }
-                    _ => eprintln!("definitely no other commands than change are allowed"),
-                }
-                */
+                    .await?
             }
             Message::Binary(_) => todo!(),
             Message::Ping(_) => todo!(),
@@ -157,16 +162,14 @@ impl Lobby {
             Message::Frame(_) => todo!(),
         }
 
-        Ok(ChangeLobbyMessage::None)
+        Ok(LobbyRequest::None)
     }
 
-    pub async fn join(&self, id: Uuid, sink: WebSocketSink) {
-        println!("[Lobby {}] Connection {} has connected", self.id, id);
+    pub async fn join(&self, id: Uuid, ws_write: WebSocketSink) {
+        let conn = Connection::new(id, ws_write);
+        println!("[Lobby {}] Connection {} has connected", self.id, conn.id);
         // handle connection joining
-        self.connections
-            .write()
-            .await
-            .push(Connection::new(id, sink));
+        self.connections.write().await.push(conn);
     }
 
     pub async fn leave(&self, id: &Uuid) {

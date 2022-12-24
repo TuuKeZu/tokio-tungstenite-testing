@@ -7,7 +7,7 @@ use hyper::upgrade::Upgraded;
 use hyper::{Body, Request, Response, Server};
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
-use lobby::{ChangeLobbyMessage, Connection, Lobby};
+use lobby::{Connection, Lobby, LobbyRequest};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -37,28 +37,71 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 /// 2 clients in 2 lobbies:
 ///   1 => Arc(lobby 1)
 ///   2 => Arc(lobby 2)
-
+/*
 pub struct LobbyManager {
     // these fields have to be private
-    connections: RwLock<Vec<Connection>>,
+    connections: RwLock<Vec<Arc<Connection>>>,
     lobbies: RwLock<Vec<Lobby>>,
     mapping: RwLock<HashMap<Uuid, Uuid>>,
 }
 
 impl LobbyManager {
-    pub fn change_lobby(&mut self, conn_id: Uuid) -> Result<(), Error> {
-        todo!()
+    pub async fn add_client(&self, conn: Arc<Connection>) {
+        let lobby_lock = self.lobbies.write().await;
+        let lobby_id = lobby_lock.iter().next().unwrap().id; // TODO handle unwrap x3
+
+        self.mapping.write().await.insert(conn.id, lobby_id);
+        self.connections.write().await.push(conn);
+
+        lobby_lock
+            .iter()
+            .find(|lobby| lobby.id == lobby_id)
+            .unwrap()
+            .join(conn); // TODO make it stop (handle unwrap x4)
     }
 
-    pub fn remove_client(&self, conn_id: Uuid) {
-        todo!()
+    pub async fn remove_client(&self, conn_id: Uuid) {
+        self.mapping.write().await.remove(&conn_id);
+
+        self.connections
+            .write()
+            .await
+            .retain(|conn| conn.id == conn_id)
     }
 
-    pub fn handle_message(&self, conn_id: Uuid, msg: Message) {
-        todo!()
+    pub async fn handle_message(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
+        let lobby_id = self.mapping.read().await.get(&conn_id).unwrap().clone(); // TODO remove unwrap
+
+        let l_request = self
+            .lobbies
+            .read()
+            .await
+            .iter()
+            .find(|lobby| lobby.id == lobby_id)
+            .unwrap() // TODO remove unwrap x2
+            .handle_message(msg, conn_id)
+            .await?;
+
+        match l_request {
+            lobby::LobbyRequest::Change { lobby_id } => {
+                //
+                self.change_lobby(conn_id, lobby_id).await?;
+            }
+            lobby::LobbyRequest::None => {}
+            LobbyRequest::Create { lobby_id } => todo!(),
+            LobbyRequest::List { connection_id } => todo!(),
+            LobbyRequest::Change { lobby_id } => todo!(),
+            LobbyRequest::None => todo!(),
+        }
+
+        Ok(())
+    }
+
+    pub async fn change_lobby(&self, conn_id: Uuid, lobby_id: Uuid) -> Result<(), Error> {
+        Ok(())
     }
 }
-
+*/
 /// `handle_messages` loops over all received
 async fn handle_messages(
     websocket: HyperWebsocket,
@@ -80,7 +123,7 @@ async fn handle_messages(
             mapping_lock.insert(id, Arc::clone(&lobby));
             lobby
         } else {
-            let lobby = Arc::new(Lobby::new());
+            let lobby = Arc::new(Lobby::default());
             mapping_lock.insert(id, Arc::clone(&lobby));
             lobby
         }
@@ -96,12 +139,40 @@ async fn handle_messages(
                 Message::Text(_) | Message::Close(_) => {
                     let lobby_change = lobby.handle_message(msg, id).await?;
 
-                    if let ChangeLobbyMessage::Change(new_lobby_id) = lobby_change {
+                    match lobby_change {
+                        LobbyRequest::Create { lobby_id } => {
+                            println!("creating new lobby...");
+                            let mut mapping_lock = mapping.write().await;
+                            mapping_lock.insert(lobby_id, Arc::new(Lobby::new(lobby_id)));
+                            drop(mapping_lock);
+                            println!("created new lobby: {}", lobby_id);
+                        }
+                        LobbyRequest::List { connection_id } => {
+                            lobby
+                                .emit(
+                                    &connection_id,
+                                    lobby::LobbyPacket::Message {
+                                        text: format!(
+                                            "your lobby: {:#?}\n lobbies: {:#?}",
+                                            lobby.id,
+                                            mapping.read().await.keys()
+                                        ),
+                                    },
+                                )
+                                .await
+                                .unwrap();
+                        }
+                        LobbyRequest::Change { lobby_id } => todo!(),
+                        LobbyRequest::None => {}
+                    }
+                    /*
+                    if let LobbyRequest::Change { lobby_id } = lobby_change {
+
                         if let Some(new_lobby) = mapping
                             .read()
                             .await
                             .iter()
-                            .find(|(_id, lobby)| lobby.id == new_lobby_id)
+                            .find(|(_id, lobby)| lobby.id == lobby_id)
                             .map(|(_, new_lobby)| Arc::clone(new_lobby))
                         {
                             // This needs to be refactor ed heavily
@@ -110,14 +181,23 @@ async fn handle_messages(
                             old_lobby.leave(&id).await;
                             mapping_lock.insert(id, Arc::clone(&new_lobby));
                             new_lobby.join(id, Arc::clone(&ws_write)).await;
+                            println!("switched lobbies");
                         } else {
-                            eprintln!("Lobby tried to change connection to nonexistent lobby");
-                            // should not panic?
+                            let mut mapping_lock = mapping.write().await;
+                            let new_lobby = Arc::new(Lobby::new(lobby_id));
+                            let old_lobby = mapping_lock.remove(&id).unwrap();
+                            old_lobby.leave(&id).await;
+                            mapping_lock.insert(id, Arc::clone(&new_lobby));
+
+                            new_lobby.join(id, Arc::clone(&ws_write)).await;
+                            println!("switched lobbies");
                         }
+
                     }
+                    */
                 }
                 Message::Binary(_) => todo!(),
-                Message::Ping(_) => println!("poing"),
+                Message::Ping(_) => println!("pong"),
                 Message::Pong(_) => todo!(),
                 Message::Frame(_) => todo!(),
             }
