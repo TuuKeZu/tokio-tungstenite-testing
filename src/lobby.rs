@@ -34,7 +34,7 @@ pub enum ClientPacket {
 
 pub enum LobbyRequest {
     Create { lobby_id: Uuid },
-    List { connection_id: Uuid },
+    List,
     Change { lobby_id: Uuid },
     None,
 }
@@ -82,10 +82,10 @@ impl Into<Message> for LobbyPacket {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Lobby {
     pub id: Uuid,
-    pub connections: RwLock<Vec<Connection>>,
+    pub connections: RwLock<Vec<Arc<Connection>>>,
 }
 
 impl Lobby {
@@ -139,7 +139,7 @@ impl Lobby {
         match msg.clone() {
             Message::Text(text) => {
                 match text.as_str() {
-                    "list" => return Ok(LobbyRequest::List { connection_id: id }),
+                    "list" => return Ok(LobbyRequest::List),
                     "create" => {
                         return Ok(LobbyRequest::Create {
                             lobby_id: Uuid::new_v4(),
@@ -156,17 +156,14 @@ impl Lobby {
             Message::Binary(_) => todo!(),
             Message::Ping(_) => todo!(),
             Message::Pong(_) => todo!(),
-            Message::Close(_info) => {
-                self.leave(&id).await;
-            }
+            Message::Close(_) => unreachable!(),
             Message::Frame(_) => todo!(),
         }
 
         Ok(LobbyRequest::None)
     }
 
-    pub async fn join(&self, id: Uuid, ws_write: WebSocketSink) {
-        let conn = Connection::new(id, ws_write);
+    pub async fn join(&self, conn: Arc<Connection>) {
         println!("[Lobby {}] Connection {} has connected", self.id, conn.id);
         // handle connection joining
         self.connections.write().await.push(conn);
