@@ -1,6 +1,6 @@
 use crate::connection::Connection;
-use crate::packets::{LobbyPacket, LobbyRequest};
-
+use crate::lobby::*;
+use crate::packets::*;
 use hyper_tungstenite::tungstenite::Message;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -9,35 +9,18 @@ use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-pub trait LobbyType: Send + Sync {}
-
-pub trait LobbyBase {
-    fn new(id: Uuid) -> Self;
-
-    fn default() -> Self;
-
-    async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error>;
-
-    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>>;
-
-    async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error>;
-
-    async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error>;
-
-    async fn join(&self, conn: Arc<Connection>);
-
-    async fn leave(&self, id: &Uuid);
-}
-
 #[derive(Debug, Default)]
-pub struct Lobby<T: LobbyType + ?Sized> {
-    pub id: Uuid,
-    pub connections: RwLock<Vec<Arc<Connection>>>,
-    pub lobby_type: PhantomData<T>,
+pub struct Default {}
+impl LobbyType for Default {}
+
+impl Lobby<Default> {
+    pub fn get_id(&self) -> Uuid {
+        self.id
+    }
 }
 
-impl LobbyBase for Lobby<dyn LobbyType> {
-    fn new(id: Uuid) -> Lobby<dyn LobbyType> {
+impl LobbyBase for Lobby<Default> {
+    fn new(id: Uuid) -> Lobby<Default> {
         Lobby {
             id,
             connections: RwLock::new(vec![]),
@@ -45,7 +28,7 @@ impl LobbyBase for Lobby<dyn LobbyType> {
         }
     }
 
-    fn default() -> Lobby<dyn LobbyType> {
+    fn default() -> Lobby<Default> {
         Lobby {
             id: Uuid::new_v4(),
             connections: RwLock::new(vec![]),
@@ -64,8 +47,6 @@ impl LobbyBase for Lobby<dyn LobbyType> {
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error> {
         /*
-        let a = self.get_connection(&Uuid::new_v4()).await.unwrap();
-
         for connection in self.connections.read().await.iter() {
             connection
                 .sink

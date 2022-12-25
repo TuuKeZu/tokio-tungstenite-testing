@@ -1,7 +1,10 @@
 #![feature(allocator_api)]
-#![feature(async_fn_in_trait)]
 
-mod lobby;
+use lib::connection::*;
+use lib::lobbies;
+use lib::lobbies::lobby_default::Default;
+use lib::lobby::*;
+use lib::packets::*;
 
 use futures::stream::{SplitSink, StreamExt};
 use futures::SinkExt;
@@ -11,11 +14,12 @@ use hyper::upgrade::Upgraded;
 use hyper::{Body, Request, Response, Server};
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
-use lobby::{Connection, DefaultLobby, Lobby, LobbyRequest};
+
 use std::alloc::Global;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
@@ -23,7 +27,16 @@ use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// What should the websocket interface support (the customer asks):
+/// situation for LobbyManager explained:
+/// - method `handle_messages`
+///     - holds read-lock for `self.lobbies`
+///     - might call `change_lobby` or `create_lobby`
+///     - both of which need a write-lock to `self.lobbies`
+/// - therefore, `handle_messages` should hold write_lock, and pass the `lobby_lock` (or `LobbyGuard`) for
+/// the methods that require write-lock. Little messy, but is the most ergonomic way to handle lobby events
+type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Lobby<dyn LobbyType>, Global>>;
+
+/// What should the websocket interface support
 /// 1. Creating a new connection (trivial)
 /// 2. a message like `broadcast: msg` the `msg` is sent to all clients in the same lobby
 /// 3. a message like `change ID` changes the lobby of the connection to lobby ID
@@ -43,14 +56,11 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 /// 2 clients in 2 lobbies:
 ///   1 => Arc(lobby 1)
 ///   2 => Arc(lobby 2)
-
-type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Lobby, Global>>;
-
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct LobbyManager {
     // these fields have to be private
     connections: RwLock<Vec<Arc<Connection>>>,
-    lobbies: RwLock<Vec<Lobby>>,
+    lobbies: RwLock<Vec<Lobby<dyn LobbyType>>>,
     mapping: RwLock<HashMap<Uuid, Uuid>>,
 }
 
@@ -65,7 +75,7 @@ impl LobbyManager {
             lobby.join(conn).await;
             self.mapping.write().await.insert(conn_id, lobby.id);
         } else {
-            let lobby = <Lobby as DefaultLobby>::default();
+            let lobby = Lobby::new(Uuid::new_v4());
             lobby.join(conn).await;
             self.mapping.write().await.insert(conn_id, lobby.id);
             lobby_lock.push(lobby);
@@ -102,16 +112,16 @@ impl LobbyManager {
             let l_request = lobby.handle_message(msg, conn_id).await?;
 
             match l_request {
-                lobby::LobbyRequest::None => {}
-                lobby::LobbyRequest::Change { lobby_id } => {
+                LobbyRequest::None => {}
+                LobbyRequest::Change { lobby_id } => {
                     self.change_lobby(conn_id, lobby_id, lobby_lock).await?;
                 }
                 LobbyRequest::Create { lobby_id } => {
                     self.create_lobby(lobby_id, lobby_lock)?;
                 }
                 LobbyRequest::List => {
-                    let msg = lobby::LobbyPacket::Message {
-                        text: format!("lobbies: {:#?}", lobby_lock),
+                    let msg = LobbyPacket::Message {
+                        text: format!("lobbies-count: {:#?}", lobby_lock.len()),
                     };
 
                     lobby.emit(&conn_id, msg).await?;
@@ -244,4 +254,7 @@ async fn main() {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
+
+    let a: Lobby<Default> = Lobby::new(Uuid::new_v4());
+    let b: Lobby<dyn LobbyType> = unsafe { std::mem::transmute(a) };
 }
