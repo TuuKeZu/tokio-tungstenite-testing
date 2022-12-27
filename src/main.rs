@@ -85,7 +85,7 @@ impl LobbyManager {
             if lobby.is_empty().await {
                 lobby_lock.retain(|l| l.get_id() != lobby_id);
 
-                println!("[{}] dropped", lobby_id);
+                println!("Lobby [{}] dropped", lobby_id);
             }
         }
 
@@ -126,8 +126,13 @@ impl LobbyManager {
                 Ok(())
             }
             LobbyRequest::List => {
+                let lobby_list: Vec<String> = lobby_lock
+                    .iter()
+                    .map(|l| format!("[{:#?}] {}", l.get_type(), l.get_id()))
+                    .collect();
+
                 let msg = LobbyPacket::Message {
-                    text: format!("lobbies-count: {:#?}", lobby_lock.len()),
+                    text: format!("{:#?}", lobby_list),
                 };
 
                 self.emit(conn_id, msg.into()).await?;
@@ -255,4 +260,6 @@ async fn main() {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
+
+    let a = "hello world";
 }

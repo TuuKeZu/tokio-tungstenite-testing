@@ -51,7 +51,7 @@ pub trait Lobby: Send + Sync {
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error>;
 
     /// Returns a `Option<Arc<Connection>>` from specified uuid
-    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>>;
+    async fn get_connection(&self, conn_id: &Uuid) -> Option<Arc<Connection>>;
 
     /// Emits a packet to specific connection
     async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error>;

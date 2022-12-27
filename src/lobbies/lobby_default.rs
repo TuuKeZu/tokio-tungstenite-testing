@@ -49,7 +49,7 @@ impl Lobby for LobbyDefault {
     }
 
     fn initialize(&self) {
-        println!("[{}] initialized", self.id);
+        println!("Lobby [{}] initialized", self.id);
     }
 
     async fn connection_count(&self) -> usize {
@@ -88,30 +88,33 @@ impl Lobby for LobbyDefault {
         Ok(())
     }
 
-    async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error> {
-        match msg.clone() {
-            Message::Text(text) => {
-                match text.as_str() {
-                    "list" => return Ok(LobbyRequest::List),
-                    "create" => {
-                        return Ok(LobbyRequest::Create {
-                            lobby_id: Uuid::new_v4(),
-                        })
-                    }
-                    "change" => return Ok(LobbyRequest::Change { lobby_id: self.id }),
-                    &_ => {}
+    async fn handle_message(&self, msg: Message, conn_id: Uuid) -> Result<LobbyRequest, Error> {
+        let json = ClientPacket::parse(msg);
+
+        match json {
+            Ok(packet) => match packet {
+                ClientPacket::Message { text } => {
+                    println!("[Lobby {}] Connection {}: {}", self.id, conn_id, text);
+
+                    self.broadcast(LobbyPacket::Message { text }).await?;
                 }
-
-                println!("[Lobby {}] Connection {}: {}", self.id, id, text);
-
-                self.broadcast(LobbyPacket::Message { text: text.clone() })
-                    .await?
+                ClientPacket::JoinLobby { id } => {
+                    return Ok(LobbyRequest::Change { lobby_id: id });
+                }
+                ClientPacket::CreateLobby => {
+                    return Ok(LobbyRequest::Create {
+                        lobby_id: Uuid::new_v4(),
+                    })
+                }
+                ClientPacket::ListLobbies => {
+                    return Ok(LobbyRequest::List);
+                }
+                ClientPacket::Close { info: _ } => {}
+            },
+            Err(e) => {
+                self.emit(&conn_id, LobbyPacket::Error { err: e.to_string() })
+                    .await?;
             }
-            Message::Binary(_) => todo!(),
-            Message::Ping(_) => todo!(),
-            Message::Pong(_) => todo!(),
-            Message::Close(_) => unreachable!(),
-            Message::Frame(_) => todo!(),
         }
 
         Ok(LobbyRequest::None)

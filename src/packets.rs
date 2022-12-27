@@ -3,20 +3,21 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 /// Deserializable packet from client
 pub enum ClientPacket {
     Message { text: String },
+    JoinLobby { id: Uuid },
+    CreateLobby,
+    ListLobbies,
     Close { info: Option<String> },
 }
 
 impl ClientPacket {
-    fn new(msg: Message) -> Result<ClientPacket, Error> {
+    pub fn parse(msg: Message) -> serde_json::Result<ClientPacket> {
         match msg {
-            Message::Text(text) => Ok(ClientPacket::Message { text }),
+            Message::Text(text) => serde_json::from_str(&text),
             Message::Binary(_) => todo!(),
             Message::Ping(_) => todo!(),
             Message::Pong(_) => todo!(),
@@ -33,13 +34,27 @@ impl ClientPacket {
 /// Serializable packet to client
 pub enum LobbyPacket {
     Message { text: String },
+    Error { err: String },
 }
+
+impl LobbyPacket {
+    pub fn to_json(self) -> String {
+        match serde_json::to_string(&self) {
+            Ok(s) => s,
+            Err(_) => serde_json::to_string(&LobbyPacket::Error {
+                err: String::from("Client side serialization failed"),
+            })
+            .unwrap(), // `LobbyPacket::Error` will always be serializable
+        }
+    }
+}
+
+// Only LobbyPacket -> Message is allowed
+#[allow(clippy::from_over_into)]
 
 impl Into<Message> for LobbyPacket {
     fn into(self) -> Message {
-        match self {
-            LobbyPacket::Message { text } => Message::Text(text),
-        }
+        Message::Text(self.to_json())
     }
 }
 
