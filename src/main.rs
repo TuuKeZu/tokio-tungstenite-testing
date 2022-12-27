@@ -1,8 +1,7 @@
 #![feature(allocator_api)]
 
 use lib::connection::*;
-use lib::lobbies;
-use lib::lobbies::lobby_default::Default;
+use lib::lobbies::lobby_default::LobbyDefault;
 use lib::lobby::*;
 use lib::packets::*;
 
@@ -18,8 +17,7 @@ use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
 use std::alloc::Global;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fmt;
-use std::marker::PhantomData;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
@@ -34,7 +32,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 ///     - both of which need a write-lock to `self.lobbies`
 /// - therefore, `handle_messages` should hold write_lock, and pass the `lobby_lock` (or `LobbyGuard`) for
 /// the methods that require write-lock. Little messy, but is the most ergonomic way to handle lobby events
-type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Lobby<dyn LobbyType>, Global>>;
+type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Box<dyn Lobby, Global>>>;
 
 /// What should the websocket interface support
 /// 1. Creating a new connection (trivial)
@@ -60,7 +58,7 @@ type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Lobby<dyn LobbyType>, Global>>;
 pub struct LobbyManager {
     // these fields have to be private
     connections: RwLock<Vec<Arc<Connection>>>,
-    lobbies: RwLock<Vec<Lobby<dyn LobbyType>>>,
+    lobbies: RwLock<Vec<Box<dyn Lobby>>>,
     mapping: RwLock<HashMap<Uuid, Uuid>>,
 }
 
@@ -73,12 +71,12 @@ impl LobbyManager {
 
         if let Some(lobby) = lobby_lock.iter().next() {
             lobby.join(conn).await;
-            self.mapping.write().await.insert(conn_id, lobby.id);
+            self.mapping.write().await.insert(conn_id, lobby.get_id());
         } else {
-            let lobby = Lobby::new(Uuid::new_v4());
+            let lobby = <LobbyDefault as Default>::default();
             lobby.join(conn).await;
             self.mapping.write().await.insert(conn_id, lobby.id);
-            lobby_lock.push(lobby);
+            lobby_lock.push(Box::new(lobby));
         }
     }
 
@@ -94,7 +92,13 @@ impl LobbyManager {
     pub async fn remove_client(&self, conn_id: Uuid) {
         let lobby_id = self.mapping.write().await.remove(&conn_id).unwrap();
 
-        if let Some(lobby) = self.lobbies.read().await.iter().find(|l| l.id == lobby_id) {
+        if let Some(lobby) = self
+            .lobbies
+            .read()
+            .await
+            .iter()
+            .find(|l| l.get_id() == lobby_id)
+        {
             lobby.leave(&conn_id).await;
         }
 
@@ -108,7 +112,7 @@ impl LobbyManager {
         let lobby_lock = self.lobbies.write().await;
         let lobby_id = *self.mapping.read().await.get(&conn_id).unwrap();
 
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.id == lobby_id) {
+        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == lobby_id) {
             let l_request = lobby.handle_message(msg, conn_id).await?;
 
             match l_request {
@@ -133,8 +137,8 @@ impl LobbyManager {
     }
 
     pub fn create_lobby(&self, lobby_id: Uuid, mut lobby_lock: LobbyGuard) -> Result<(), Error> {
-        let lobby = Lobby::new(lobby_id);
-        lobby_lock.push(lobby);
+        let lobby = <LobbyDefault as Default>::default();
+        lobby_lock.push(Box::new(lobby));
 
         Ok(())
     }
@@ -154,11 +158,11 @@ impl LobbyManager {
 
         let conn = self.get_connection(conn_id).await.unwrap();
 
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.id == old_lobby) {
+        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == old_lobby) {
             lobby.leave(&conn_id).await;
         }
 
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.id == new_lobby) {
+        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == new_lobby) {
             lobby.join(conn).await;
         } else {
             eprintln!("Lobby doesn't exists");
@@ -254,7 +258,4 @@ async fn main() {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
-
-    let a: Lobby<Default> = Lobby::new(Uuid::new_v4());
-    let b: Lobby<dyn LobbyType> = unsafe { std::mem::transmute(a) };
 }

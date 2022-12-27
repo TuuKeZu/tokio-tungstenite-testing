@@ -1,6 +1,7 @@
 use crate::connection::Connection;
 use crate::packets::{LobbyPacket, LobbyRequest};
 
+use async_trait::async_trait;
 use hyper_tungstenite::tungstenite::Message;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -9,12 +10,13 @@ use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-pub trait LobbyType: Send + Sync {}
+#[async_trait]
+pub trait Lobby: Send + Sync {
+    fn default() -> Self
+    where
+        Self: Sized;
 
-pub trait LobbyBase {
-    fn new(id: Uuid) -> Self;
-
-    fn default() -> Self;
+    fn get_id(&self) -> Uuid;
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error>;
 
@@ -28,7 +30,7 @@ pub trait LobbyBase {
 
     async fn leave(&self, id: &Uuid);
 }
-
+/*
 #[derive(Debug, Default)]
 pub struct Lobby<T: LobbyType + ?Sized> {
     pub id: Uuid,
@@ -36,7 +38,7 @@ pub struct Lobby<T: LobbyType + ?Sized> {
     pub lobby_type: PhantomData<T>,
 }
 
-impl LobbyBase for Lobby<dyn LobbyType> {
+impl Lobby for Lobby<dyn LobbyType> {
     fn new(id: Uuid) -> Lobby<dyn LobbyType> {
         Lobby {
             id,
@@ -129,3 +131,4 @@ impl LobbyBase for Lobby<dyn LobbyType> {
         self.connections.write().await.retain(|conn| &conn.id != id);
     }
 }
+*/

@@ -1,8 +1,9 @@
 use crate::connection::Connection;
 use crate::lobby::*;
 use crate::packets::*;
+use async_trait::async_trait;
+use futures::SinkExt;
 use hyper_tungstenite::tungstenite::Message;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -10,30 +11,22 @@ use uuid::Uuid;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Default)]
-pub struct Default {}
-impl LobbyType for Default {}
-
-impl Lobby<Default> {
-    pub fn get_id(&self) -> Uuid {
-        self.id
-    }
+pub struct LobbyDefault {
+    pub id: Uuid,
+    pub connections: RwLock<Vec<Arc<Connection>>>,
 }
 
-impl LobbyBase for Lobby<Default> {
-    fn new(id: Uuid) -> Lobby<Default> {
-        Lobby {
-            id,
+#[async_trait]
+impl Lobby for LobbyDefault {
+    fn default() -> LobbyDefault {
+        LobbyDefault {
+            id: Uuid::new_v4(),
             connections: RwLock::new(vec![]),
-            lobby_type: PhantomData,
         }
     }
 
-    fn default() -> Lobby<Default> {
-        Lobby {
-            id: Uuid::new_v4(),
-            connections: RwLock::new(vec![]),
-            lobby_type: PhantomData,
-        }
+    fn get_id(&self) -> Uuid {
+        self.id
     }
 
     async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>> {
@@ -46,7 +39,6 @@ impl LobbyBase for Lobby<Default> {
     }
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error> {
-        /*
         for connection in self.connections.read().await.iter() {
             connection
                 .sink
@@ -55,18 +47,17 @@ impl LobbyBase for Lobby<Default> {
                 .send(packet.clone().into())
                 .await?;
         }
-        */
+
         Ok(())
     }
 
     async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
-        /*
         if let Some(conn) = self.get_connection(conn_id).await {
             conn.sink.lock().await.send(msg.clone().into()).await?;
         } else {
             eprintln!("Cannot emit to non-existent connection {conn_id}");
         }
-        */
+
         Ok(())
     }
 
@@ -85,6 +76,7 @@ impl LobbyBase for Lobby<Default> {
                 }
 
                 println!("[Lobby {}] Connection {}: {}", self.id, id, text);
+
                 self.broadcast(LobbyPacket::Message { text: text.clone() })
                     .await?
             }
