@@ -1,14 +1,9 @@
-use futures::stream::SplitSink;
-use hyper::upgrade::Upgraded;
 use hyper_tungstenite::tungstenite::Message;
-use hyper_tungstenite::WebSocketStream;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
-type WebSocketSink = Arc<Mutex<SplitSink<WebSocketStream<Upgraded>, Message>>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]

@@ -4,6 +4,7 @@ use crate::packets::*;
 use async_trait::async_trait;
 use futures::SinkExt;
 use hyper_tungstenite::tungstenite::Message;
+use std::any::Any;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -12,14 +13,24 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Default)]
 pub struct LobbyDefault {
-    pub id: Uuid,
+    lobby_type: LobbyType,
+    id: Uuid,
     pub connections: RwLock<Vec<Arc<Connection>>>,
 }
 
 #[async_trait]
 impl Lobby for LobbyDefault {
+    fn new(id: Uuid) -> LobbyDefault {
+        LobbyDefault {
+            lobby_type: LobbyType::Default,
+            id,
+            connections: RwLock::new(vec![]),
+        }
+    }
+
     fn default() -> LobbyDefault {
         LobbyDefault {
+            lobby_type: LobbyType::Default,
             id: Uuid::new_v4(),
             connections: RwLock::new(vec![]),
         }
@@ -29,13 +40,20 @@ impl Lobby for LobbyDefault {
         self.id
     }
 
-    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>> {
-        self.connections
-            .read()
-            .await
-            .iter()
-            .find(|conn| id == &conn.id)
-            .map(Arc::clone)
+    fn get_type(&self) -> LobbyType {
+        self.lobby_type
+    }
+
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn initialize(&self) {
+        println!("[{}] initialized", self.id);
+    }
+
+    async fn connection_count(&self) -> usize {
+        self.connections.write().await.len()
     }
 
     async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error> {
@@ -49,6 +67,15 @@ impl Lobby for LobbyDefault {
         }
 
         Ok(())
+    }
+
+    async fn get_connection(&self, id: &Uuid) -> Option<Arc<Connection>> {
+        self.connections
+            .read()
+            .await
+            .iter()
+            .find(|conn| id == &conn.id)
+            .map(Arc::clone)
     }
 
     async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error> {
@@ -92,13 +119,12 @@ impl Lobby for LobbyDefault {
 
     async fn join(&self, conn: Arc<Connection>) {
         println!("[Lobby {}] Connection {} has connected", self.id, conn.id);
-        // handle connection joining
+
         self.connections.write().await.push(conn);
     }
 
     async fn leave(&self, id: &Uuid) {
         println!("[Lobby {}] Connection {} has disconnected", self.id, id);
-        // handle connection leaving
         self.connections.write().await.retain(|conn| &conn.id != id);
     }
 }
