@@ -2,6 +2,7 @@
 
 use lib::connection::*;
 use lib::lobbies::lobby_default::LobbyDefault;
+use lib::lobbies::lobby_chat::LobbyChat;
 use lib::lobby::*;
 use lib::packets::*;
 
@@ -21,6 +22,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 use uuid::Uuid;
 
+use colored::*;
+
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// situation for LobbyManager explained:
@@ -32,6 +35,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 /// the methods that require write-lock. Little messy, but is the most ergonomic way to handle lobby events
 type LobbyGuard<'a> = RwLockWriteGuard<'a, Vec<Box<dyn Lobby, Global>>>;
 
+
 #[derive(Default)]
 pub struct LobbyManager {
     // these fields should be private
@@ -41,22 +45,24 @@ pub struct LobbyManager {
 }
 
 impl LobbyManager {
-    pub async fn add_client(&self, conn: Arc<Connection>) {
+    pub async fn add_client(&self, conn: Arc<Connection>) -> Result<(), Error> {
         let mut lobby_lock = self.lobbies.write().await;
         let conn_id = conn.id;
 
         self.connections.write().await.push(conn.clone());
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.is_default()) {
-            lobby.join(conn).await;
+            lobby.join(conn).await?;
             self.mapping.write().await.insert(conn_id, lobby.get_id());
         } else {
             let lobby = LobbyDefault::new(Uuid::new_v4());
             lobby.initialize();
-            lobby.join(conn).await;
+            lobby.join(conn).await?;
             self.mapping.write().await.insert(conn_id, lobby.get_id());
             lobby_lock.push(Box::new(lobby));
         }
+
+        Ok(())
     }
 
     pub async fn get_connection(&self, conn_id: Uuid) -> Option<Arc<Connection>> {
@@ -75,17 +81,17 @@ impl LobbyManager {
         Ok(())
     }
 
-    pub async fn remove_client(&self, conn_id: Uuid) {
+    pub async fn remove_client(&self, conn_id: Uuid) -> Result<(), Error> {
         let mut lobby_lock = self.lobbies.write().await;
         let lobby_id = self.mapping.write().await.remove(&conn_id).unwrap();
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == lobby_id) {
-            lobby.leave(&conn_id).await;
-
+            lobby.leave(&conn_id).await?;
+                
             if lobby.is_empty().await {
-                lobby_lock.retain(|l| l.get_id() != lobby_id);
+                println!("{} {}", lobby, format!("Dropped").red().bold());
 
-                println!("Lobby [{}] dropped", lobby_id);
+                lobby_lock.retain(|l| l.get_id() != lobby_id);
             }
         }
 
@@ -93,6 +99,8 @@ impl LobbyManager {
             .write()
             .await
             .retain(|conn| conn.id != conn_id);
+        
+        Ok(())
     }
 
     pub async fn handle_message(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
@@ -122,13 +130,14 @@ impl LobbyManager {
                 Ok(())
             }
             LobbyRequest::Create { lobby_id } => {
-                self.create_lobby(lobby_id, lobby_lock)?;
+                let lobby_id = self.create_lobby(lobby_id, lobby_lock)?;
+                self.change_lobby(conn_id, lobby_id, lobby_lock).await?;
                 Ok(())
             }
             LobbyRequest::List => {
                 let lobby_list: Vec<String> = lobby_lock
                     .iter()
-                    .map(|l| format!("[{:#?}] {}", l.get_type(), l.get_id()))
+                    .map(|l| format!("{}", l))
                     .collect();
 
                 let msg = LobbyPacket::Message {
@@ -141,12 +150,12 @@ impl LobbyManager {
         }
     }
 
-    pub fn create_lobby(&self, lobby_id: Uuid, lobby_lock: &mut LobbyGuard) -> Result<(), Error> {
+    pub fn create_lobby(&self, lobby_id: Uuid, lobby_lock: &mut LobbyGuard) -> Result<Uuid, Error> {
         let lobby = LobbyDefault::new(lobby_id);
         lobby.initialize();
         lobby_lock.push(Box::new(lobby));
 
-        Ok(())
+        Ok(lobby_id)
     }
 
     pub async fn change_lobby(
@@ -165,11 +174,11 @@ impl LobbyManager {
         let conn = self.get_connection(conn_id).await.unwrap();
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == old_lobby) {
-            lobby.leave(&conn_id).await;
+            lobby.leave(&conn_id).await?;
         }
 
         if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == new_lobby) {
-            lobby.join(conn).await;
+            lobby.join(conn).await?;
         } else {
             eprintln!("Lobby doesn't exists");
         }
@@ -192,7 +201,7 @@ async fn handle_messages(
     let conn_id = Uuid::new_v4();
     let conn = Arc::new(Connection::new(conn_id, ws_write));
 
-    mapping.add_client(conn).await;
+    mapping.add_client(conn).await?;
 
     while let Some(message) = ws_read.next().await {
         let msg = message?;
@@ -200,7 +209,7 @@ async fn handle_messages(
         match msg {
             Message::Text(_) | Message::Binary(_) => {
                 if let Err(e) = mapping.handle_message(conn_id, msg).await {
-                    eprintln!("Error occured when trying to handle message: {:#?}", e);
+                    eprintln!("Error occured when trying to handle message: {}", format!("{:#?}", e).red());
                 }
             }
             Message::Ping(_) => todo!(),
@@ -212,7 +221,7 @@ async fn handle_messages(
         }
     }
 
-    mapping.remove_client(conn_id).await;
+    mapping.remove_client(conn_id).await?;
 
     Ok(())
 }
@@ -227,7 +236,7 @@ async fn handle_connection(
         tokio::spawn(async move {
             let mapping = Arc::clone(&mapping);
             if let Err(e) = handle_messages(websocket, mapping).await {
-                eprintln!("Error in websocket connection: {}", e);
+                eprintln!("Error in websocket connection: {}", format!("{}", e).red());
             }
         });
 
@@ -255,11 +264,10 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     let server = Server::bind(&addr).serve(make_service);
 
-    println!("Listening on ws://{}", addr);
+    println!("Server started on {}", format!("ws://{}", addr).green());
+
 
     if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
+        eprintln!("Server error: {}", format!("{}", e).red());
     }
-
-    let a = "hello world";
 }

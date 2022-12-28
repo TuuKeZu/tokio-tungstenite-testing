@@ -4,8 +4,10 @@ use crate::packets::{LobbyPacket, LobbyRequest};
 use async_trait::async_trait;
 use hyper_tungstenite::tungstenite::Message;
 use std::any::Any;
+use std::fmt::Display;
 use std::sync::Arc;
 use uuid::Uuid;
+use colored::*;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -21,7 +23,7 @@ impl Default for LobbyType {
 }
 
 #[async_trait]
-pub trait Lobby: Send + Sync {
+pub trait Lobby: Send + Sync + Display {
     /// Creates new lobby struct with specified uuid
     fn new(id: Uuid) -> Self
     where
@@ -60,10 +62,10 @@ pub trait Lobby: Send + Sync {
     async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error>;
 
     /// Add client to the lobby
-    async fn join(&self, conn: Arc<Connection>);
+    async fn join(&self, conn: Arc<Connection>) -> Result<(), Error>;
 
     /// removes client from the lobby
-    async fn leave(&self, id: &Uuid);
+    async fn leave(&self, id: &Uuid) -> Result<(), Error>;
 }
 
 // Implement general helper methods for all lobbies

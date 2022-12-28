@@ -21,9 +21,7 @@ impl ClientPacket {
             Message::Binary(_) => todo!(),
             Message::Ping(_) => todo!(),
             Message::Pong(_) => todo!(),
-            Message::Close(info) => Ok(ClientPacket::Close {
-                info: info.map(|f| f.to_string()),
-            }),
+            Message::Close(_) => todo!(),
             Message::Frame(_) => todo!(),
         }
     }
@@ -33,6 +31,7 @@ impl ClientPacket {
 #[serde(tag = "type")]
 /// Serializable packet to client
 pub enum LobbyPacket {
+    LobbyUpdate { current: Uuid },
     Message { text: String },
     Error { err: String },
 }
