@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 colored = "2.0.0"
+enum_dispatch = "0.3.8"
 lazy_static = { version="1.4.0"}
 futures = { version="0.3" }
 tokio = { version="1.0", features=["io-std","rt-multi-thread","macros"] }

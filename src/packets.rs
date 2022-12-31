@@ -1,61 +1,77 @@
+///////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////
+////////////////////// DELET THIS /////////////////////////
+///////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////
+
+
+use std::any::Any;
+use enum_dispatch::enum_dispatch;
+
 use hyper_tungstenite::tungstenite::Message;
 use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
+
+/// General trait for all packets
+pub trait LobbyPacket: Send + Sync + Sized + TryFrom<Message> + TryInto<Message> {}
+
+/// Deserializable packet from client
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-/// Deserializable packet from client
 pub enum ClientPacket {
     Message { text: String },
     JoinLobby { id: Uuid },
     CreateLobby,
     ListLobbies,
     Close { info: Option<String> },
+    Error { err: String }
 }
 
-impl ClientPacket {
-    pub fn parse(msg: Message) -> serde_json::Result<ClientPacket> {
-        match msg {
-            Message::Text(text) => serde_json::from_str(&text),
-            Message::Binary(_) => todo!(),
-            Message::Ping(_) => todo!(),
-            Message::Pong(_) => todo!(),
-            Message::Close(_) => todo!(),
-            Message::Frame(_) => todo!(),
-        }
+impl TryFrom<Message> for ClientPacket {
+    type Error = Error;
+
+    fn try_from(value: Message) -> Result<Self, <Self as TryFrom<Message>>::Error> {
+        todo!()
     }
 }
 
+impl TryInto<Message> for ClientPacket {
+    type Error = Error;
+    fn try_into(self) -> Result<Message, <Self as TryFrom<Message>>::Error> {
+        todo!()
+    }
+}
+
+
+/// Serializable packet to client
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-/// Serializable packet to client
-pub enum LobbyPacket {
+pub enum ServerPacket {
     LobbyUpdate { current: Uuid },
     Message { text: String },
     Error { err: String },
 }
 
-impl LobbyPacket {
-    pub fn to_json(self) -> String {
-        match serde_json::to_string(&self) {
-            Ok(s) => s,
-            Err(_) => serde_json::to_string(&LobbyPacket::Error {
-                err: String::from("Client side serialization failed"),
-            })
-            .unwrap(), // `LobbyPacket::Error` will always be serializable
-        }
+impl TryFrom<Message> for ServerPacket {
+    type Error = Error;
+
+    fn try_from(msg: Message) -> Result<Self, <Self as TryFrom<Message>>::Error> {
+        todo!()
     }
 }
 
-// Only LobbyPacket -> Message is allowed
-#[allow(clippy::from_over_into)]
+impl TryInto<Message> for ServerPacket {
+    type Error = Error;
 
-impl Into<Message> for LobbyPacket {
-    fn into(self) -> Message {
-        Message::Text(self.to_json())
+    fn try_into(self) -> Result<Message, <Self as TryInto<Message>>::Error> {
+        todo!()
     }
 }
+
 
 #[derive(Debug)]
 pub enum LobbyRequest {

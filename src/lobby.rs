@@ -1,5 +1,4 @@
 use crate::connection::Connection;
-use crate::packets::{LobbyPacket, LobbyRequest};
 
 use async_trait::async_trait;
 use hyper_tungstenite::tungstenite::Message;
@@ -8,6 +7,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use uuid::Uuid;
 use colored::*;
+
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -50,13 +50,14 @@ pub trait Lobby: Send + Sync + Display {
     async fn connection_count(&self) -> usize;
 
     /// Broacasts a packet to all connected clients
-    async fn broadcast(&self, packet: LobbyPacket) -> Result<(), Error>;
+    async fn broadcast(&self, msg: Message) -> Result<(), Error>;
 
     /// Returns a `Option<Arc<Connection>>` from specified uuid
     async fn get_connection(&self, conn_id: &Uuid) -> Option<Arc<Connection>>;
 
     /// Emits a packet to specific connection
-    async fn emit(&self, conn_id: &Uuid, msg: LobbyPacket) -> Result<(), Error>;
+    /// TODO move emit to [`Connection`]
+    async fn emit(&self, conn_id: &Uuid, msg: Message) -> Result<(), Error>;
 
     /// Handles events. Lobby's logic should happen here
     async fn handle_message(&self, msg: Message, id: Uuid) -> Result<LobbyRequest, Error>;
@@ -66,18 +67,23 @@ pub trait Lobby: Send + Sync + Display {
 
     /// removes client from the lobby
     async fn leave(&self, id: &Uuid) -> Result<(), Error>;
-}
 
-// Implement general helper methods for all lobbies
-
-impl dyn Lobby {
     /// Returns `true` if the lobby's type is `LobbyType::Default`
-    pub fn is_default(&self) -> bool {
+    fn is_default(&self) -> bool {
         self.get_type() == LobbyType::Default
     }
 
     /// returns `true` if the lobby doesn't have any connections
-    pub async fn is_empty(&self) -> bool {
+    async fn is_empty(&self) -> bool {
         self.connection_count().await == 0
     }
 }
+
+#[derive(Debug)]
+pub enum LobbyRequest {
+    Create { lobby_id: Uuid },
+    List,
+    Change { lobby_id: Uuid },
+    None,
+}
+

@@ -1,10 +1,11 @@
 #![feature(allocator_api)]
+#![feature(associated_type_defaults)]
 
 use lib::connection::*;
 use lib::lobbies::lobby_default::LobbyDefault;
-use lib::lobbies::lobby_chat::LobbyChat;
+use lib::lobbies::lobby_default::ServerPacket;
+//use lib::lobbies::lobby_chat::LobbyChat;
 use lib::lobby::*;
-use lib::packets::*;
 
 use futures::stream::StreamExt;
 use futures::SinkExt;
@@ -74,7 +75,7 @@ impl LobbyManager {
             .cloned()
     }
 
-    pub async fn emit(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
+    async fn emit(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
         if let Some(conn) = self.get_connection(conn_id).await {
             conn.sink.lock().await.send(msg).await?;
         }
@@ -104,14 +105,23 @@ impl LobbyManager {
     }
 
     pub async fn handle_message(&self, conn_id: Uuid, msg: Message) -> Result<(), Error> {
-        let mut lobby_lock = self.lobbies.write().await;
         let lobby_id = *self.mapping.read().await.get(&conn_id).unwrap();
+        
+        let l_request = if let Some(lobby) = self.lobbies.read().await.iter().find(|l| l.get_id() == lobby_id){
+            lobby.handle_message(msg, conn_id).await
+        } else {
+            return Ok(())
+        };
 
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == lobby_id) {
-            let l_request = lobby.handle_message(msg, conn_id).await?;
-
-            self.handle_lobby_request(conn_id, &mut lobby_lock, l_request)
+        let mut lobby_lock = self.lobbies.write().await;
+        match l_request {
+            Ok(l_request) => {
+                self.handle_lobby_request(conn_id, &mut lobby_lock, l_request)
                 .await?
+            }
+            Err(e) => {
+                self.emit(conn_id, ServerPacket::Error { err: e.to_string() }.try_into()?).await?;
+            }
         }
 
         Ok(())
@@ -140,11 +150,11 @@ impl LobbyManager {
                     .map(|l| format!("{}", l))
                     .collect();
 
-                let msg = LobbyPacket::Message {
+                let msg = ServerPacket::Message {
                     text: format!("{:#?}", lobby_list),
-                };
+                }.try_into()?;
 
-                self.emit(conn_id, msg.into()).await?;
+                self.emit(conn_id, msg).await?;
                 Ok(())
             }
         }
@@ -161,29 +171,35 @@ impl LobbyManager {
     pub async fn change_lobby(
         &self,
         conn_id: Uuid,
-        new_lobby: Uuid,
+        new_lobby_id: Uuid,
         lobby_lock: &mut LobbyGuard<'_>,
     ) -> Result<(), Error> {
-        let old_lobby = *self.mapping.read().await.get(&conn_id).unwrap();
+        let old_lobby_id = *self.mapping.read().await.get(&conn_id).unwrap();
 
-        if old_lobby == new_lobby {
+        if old_lobby_id == new_lobby_id {
             println!("You are already in this lobby");
             return Ok(());
         }
-
-        let conn = self.get_connection(conn_id).await.unwrap();
-
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == old_lobby) {
+        
+        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == old_lobby_id) {
             lobby.leave(&conn_id).await?;
-        }
 
-        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == new_lobby) {
+            if lobby.is_empty().await {
+                println!("{} {}", lobby, format!("Dropped").red().bold());
+
+                lobby_lock.retain(|l| l.get_id() != old_lobby_id);
+            }
+        }
+        
+        let conn = self.get_connection(conn_id).await.unwrap();
+        
+        if let Some(lobby) = lobby_lock.iter().find(|l| l.get_id() == new_lobby_id) {
             lobby.join(conn).await?;
         } else {
             eprintln!("Lobby doesn't exists");
         }
 
-        self.mapping.write().await.insert(conn_id, new_lobby);
+        self.mapping.write().await.insert(conn_id, new_lobby_id);
 
         Ok(())
     }
